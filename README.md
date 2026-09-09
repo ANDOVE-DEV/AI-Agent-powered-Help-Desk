@@ -1150,16 +1150,16 @@ This provides:
 ### 7.1 Flow 1 — User Ticket (main pipeline, asynchronous)
 
 ```text
-User ──create ticket──▶ GLPI (authenticated via Samba AD)
-GLPI ──webhook ticket.create (HMAC)──▶ FastAPI /webhooks/glpi
-FastAPI: verify HMAC │ validate payload │ dedup (ticket_id+event_id)
-FastAPI ──LPUSH──▶ Redis helpdesk:queue          (responds 202 to GLPI)
-Worker ──BRPOPLPUSH queue→processing (§5.6)──▶ builds initial TicketState
-Worker ──ainvoke(thread_id=ticket-<id>)──▶ LangGraph
-    classify ▶ retrieve_kb ▶ decide ▶ [execute | respond | route] ▶ finalize
+ 1. User         ──create ticket──▶ GLPI (authenticated via Samba AD)
+ 2. GLPI         ──webhook ticket.create (HMAC)──▶ FastAPI /webhooks/glpi
+ 3. FastAPI: verify HMAC │ validate payload │ dedup (ticket_id + event_id)
+ 4. FastAPI      ──LPUSH──▶ Redis helpdesk:queue (responds 202 to GLPI immediately)
+ 5. Worker       ──BRPOPLPUSH queue→processing (§5.6)──▶ builds initial TicketState
+ 6. Worker       ──ainvoke(thread_id=ticket-<id>)──▶ LangGraph:
+      classify ▶ retrieve_kb ▶ decide ▶ [execute | respond | route] ▶ finalize
       (LLM calls → Ollama local or cloud API per §5.3; provider error ⇒ auto-fallback)
-LangGraph ──REST API──▶ GLPI (followups, assignment, status, satisfaction trigger)
-LangGraph ──traces──▶ LangSmith (self-hosted)
+ 7. LangGraph    ──REST API──▶ GLPI: followups, assignment, status, satisfaction trigger
+ 8. LangGraph    ──traces──▶ LangSmith (self-hosted)
 ```
 
 **Characteristics:** at-least-once delivery (Redis reliable-queue pattern, §5.6), idempotent consumption (thread_id + dedup keys + `action_executed` + idempotency keys, §6.6), fail-safe error handling (no ticket left without a human owner), no LLM work in the request path.
@@ -1167,13 +1167,13 @@ LangGraph ──traces──▶ LangSmith (self-hosted)
 ### 7.2 Flow 2 — Proactive Network Alert (Technova)
 
 ```text
-FRR router / Linux bridges ──SNMP + node_exporter──▶ Prometheus
-Prometheus ──alert firing──▶ Alertmanager
-Alertmanager: dedup by fingerprint │ group │ silence during maintenance
-Alertmanager ──webhook (HMAC)──▶ FastAPI /webhooks/alertmanager
-FastAPI ──create ticket (category=network, source=alertmanager,
-          severity from alert labels)──▶ GLPI REST API
-FastAPI ──LPUSH──▶ Redis  ⇒  same pipeline as Flow 1
+ 1. FRR router / bridges ──SNMP + node_exporter──▶ Prometheus
+ 2. Prometheus   ──alert firing──▶ Alertmanager
+ 3. Alertmanager: dedup by fingerprint │ group │ silence during maintenance
+ 4. Alertmanager ──webhook (HMAC)──▶ FastAPI /webhooks/alertmanager
+ 5. FastAPI      ──create ticket──▶ GLPI REST API
+      (category=network, source=alertmanager, severity from alert labels)
+ 6. FastAPI      ──LPUSH──▶ Redis ⇒ same pipeline as Flow 1 (steps 5–8)
 ```
 
 Alert-derived tickets carry `source="alertmanager"`: the decision prompt treats them with the full alert context (labels, description) and P1/P2 alerts are always human-routed by the deterministic guard.
@@ -1579,4 +1579,4 @@ F1 ──▶ F2 ──▶ F3 ──▶ F4
 | 2.0 | 2026-09-08 | Full rewrite: framework unified on LangChain/LangGraph/LangSmith (CrewAI removed); HITL approval matrix via LangGraph `interrupt` + GLPI approval tickets; single confidence threshold (0.85) enforced in code; structured tool actions replacing string parsing; checkpointer/persistence added; §5 completed and reformatted; new sections 7–12 (Data Flow, Integration Points, Security, Deployment, Monitoring, Roadmap) |
 | 2.1 | 2026-09-08 | Provider-agnostic LLM layer: local Ollama **or** cloud APIs (Groq, OpenAI, Anthropic, Azure OpenAI, Mistral) behind `BaseChatModel`/`BaseEmbeddings` with env-based selection; fallback chains, premium-tier routing for complex tickets, A/B testing; Principle 2 reframed (local-first by default, cloud opt-in); new §5.3 (LLM Provider Layer), §9.9 (cloud governance & data egress), §11.6 (cost tracking); GPU now optional with deployment profiles; security, monitoring, and roadmap updated for provider/cost/failover |
 | 2.2 | 2026-09-08 | Audit hardening: Redis reliable-queue pattern (`BRPOPLPUSH` + `helpdesk:processing`) replacing lossy `BRPOP`; execute-node failure paths (validation refusal, approval rejection, tool error) now always assign a human owner (`_escalate_to_human`); true at-most-once via durable idempotency key `(ticket_id, action)` claimed before side effects (fail-closed); corrected `AsyncPostgresSaver` usage (async context manager + `setup()`); worker fail-safe error handling; GLPI no longer publishes host ports; temporary-password delivery designed (internal SMTP relay, §8 row 12 + §9.4) |
-| 2.3 | 2026-09-08 | Data-flow diagrams §7.3/§7.4 reworked to numbered step-per-line format; §6.3 ASCII state machine replaced with Mermaid `stateDiagram-v2` (guard + HITL interrupt notes) plus node legend table; §10.1 adds a Mermaid decision tree for deployment-profile selection |
+| 2.3 | 2026-09-08 | Data-flow diagrams §7.1–§7.4 reworked to numbered step-per-line format; §6.3 ASCII state machine replaced with Mermaid `stateDiagram-v2` (guard + HITL interrupt notes) plus node legend table; §10.1 adds a Mermaid decision tree for deployment-profile selection |
