@@ -2,7 +2,7 @@
 
 **Version:** 2.2
 **Last Updated:** 2026-09-08
-**Author:** [Your Name]
+**Author:** Andrea Colombo
 **Status:** Design Phase
 
 ---
