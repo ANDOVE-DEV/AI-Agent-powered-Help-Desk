@@ -1181,16 +1181,25 @@ Alert-derived tickets carry `source="alertmanager"`: the decision prompt treats 
 ### 7.3 Flow 3 — HITL Approval & Resume
 
 ```text
-execute_node: requires_approval(action) == True
-    │ glpi_client.ensure_approval_ticket(parent, action, args)   [idempotent]
-    │ interrupt(payload)          ◀── graph PAUSED, state checkpointed in Postgres
-Approver ──answers approval ticket in GLPI──▶ GLPI
-GLPI ──webhook approval.answer──▶ FastAPI
-FastAPI: verify HMAC │ verify approver role (AD group check) ──▶ POST /api/approvals/{ticket_id}
-Worker ──ainvoke(Command(resume={status, comment}), thread_id)──▶ LangGraph
-    execute_node re-runs: ensure_approval_ticket (no-op, found) ▶ interrupt returns decision
-    approved ▶ tool executes (guarded by action_executed) │ rejected ▶ followup + human queue
-finalize ▶ GLPI write-back ▶ audit log
+ 1. execute_node: requires_approval(action) == True (§6.6)
+ 2. execute_node ──ensure_approval_ticket [idempotent]──▶ GLPI: child approval ticket
+ 3. execute_node ──interrupt(payload)──▶ GRAPH PAUSED (state checkpointed in Postgres)
+
+    ... the graph stays paused until a human answers (minutes to hours) ...
+
+ 4. Approver     ──approve / reject + comment──▶ GLPI (answers the approval ticket)
+ 5. GLPI         ──webhook approval.answer (HMAC)──▶ FastAPI
+ 6. FastAPI: verify HMAC + approver role (AD group check)
+ 7. FastAPI      ──POST /api/approvals/{ticket_id}:
+                    ainvoke(Command(resume={status, comment}), thread_id)──▶ LangGraph
+
+ 8. execute_node re-runs from its start:
+      ensure_approval_ticket → no-op (existing ticket found)
+      interrupt(...)         → returns the human decision
+ 9. two outcomes:
+      9a. approved ──▶ tool executes (at-most-once guards, §6.6) ──▶ step 10
+      9b. rejected ──▶ _escalate_to_human: team assignment + followup ──▶ step 10
+10. finalize     ──▶ GLPI write-back (status/solution) + audit log (§9.7)
 ```
 
 Pending approvals are tracked as a metric (`helpdesk_hitl_pending`) with an escalation alert if an approval sits unanswered beyond its SLA (approval fatigue & queue starvation, §11.3).
@@ -1198,14 +1207,20 @@ Pending approvals are tracked as a metric (`helpdesk_hitl_pending`) with an esca
 ### 7.4 Flow 4 — Knowledge Base Sync & Growth
 
 ```text
-SYNC (every 30 min, cron):
-BookStack API ──pages updated since last_sync──▶ KB Sync Service
-    chunk by heading ▶ embed (configured provider, §5.3) ▶ upsert/delete in ChromaDB
+A) SYNC — keeps the RAG index aligned with BookStack (cron, every 30 min):
 
-GROWTH (on AI-resolved ticket close):
-finalize ──event──▶ KB draft generator (LLM: ticket + resolution trace → article draft)
-    ──BookStack API (draft=true)──▶ human review in BookStack
-    ──publish──▶ next sync pass embeds it into ChromaDB
+ 1. KB Sync Service ──GET pages updated since last_sync──▶ BookStack API
+ 2. KB Sync Service: chunk each page by heading (h2/h3)
+ 3. KB Sync Service: embed chunks (configured provider §5.3 — pinned per collection)
+ 4. KB Sync Service ──upsert changed chunks / delete removed pages──▶ ChromaDB
+
+B) GROWTH — resolved tickets become new KB articles (on AI-resolved close):
+
+ 5. finalize         ──event──▶ KB draft generator
+ 6. KB draft generator: LLM(ticket + resolution trace) → article draft
+ 7. KB draft generator ──create page (draft=true)──▶ BookStack API
+ 8. Human reviewer   ──review──▶ BookStack: publish or discard
+ 9. published page   ──▶ picked up by the next SYNC pass (steps 1–4) → ChromaDB
 ```
 
 Drafts never reach the RAG index before human publication — the KB stays a trusted-by-review source even though its growth is automated.
