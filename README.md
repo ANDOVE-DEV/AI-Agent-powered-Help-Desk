@@ -1,6 +1,6 @@
 # 🏗️ AI-Powered Help Desk — Architecture Design Document
 
-**Version:** 2.2
+**Version:** 2.3
 **Last Updated:** 2026-09-08
 **Author:** Andrea Colombo
 **Status:** Design Phase
@@ -565,43 +565,43 @@ The agent is a **LangChain + LangGraph** stateful workflow — not a role-based 
 
 The ticket processing workflow is modeled as a state machine with explicit nodes and conditional edges:
 
-```text
-                ┌─────────────────┐
-                │  TICKET INPUT   │
-                └────────┬────────┘
-                         │
-                         ▼
-                ┌─────────────────┐
-                │    CLASSIFY     │  Node 1 — category, priority,
-                └────────┬────────┘           confidence, entities
-                         │
-                         ▼
-                ┌─────────────────┐
-                │   RETRIEVE KB   │  Node 2 — RAG search
-                └────────┬────────┘           (score threshold 0.7)
-                         │
-                         ▼
-                ┌─────────────────┐
-                │     DECIDE      │  Node 3 — auto_resolve |
-                └────────┬────────┘           respond_with_guide | escalate
-                         │
-           ┌─────────────┼──────────────┐
-           │             │              │   Deterministic guard (code, not LLM):
-           ▼             ▼              ▼   confidence < 0.85 OR priority P1/P2
-     ┌───────────┐ ┌───────────┐ ┌───────────┐  ⇒ forced to ROUTE
-     │  EXECUTE  │ │  RESPOND  │ │   ROUTE   │
-     │ (action;  │ │ (KB guide │ │ (assign   │
-     │ interrupt │ │  to user) │ │  to team) │
-     │ if sensi- │ └─────┬─────┘ └─────┬─────┘
-     │ tive §6.6)│       │             │
-     └─────┬─────┘       │             │
-           └─────────────┼─────────────┘
-                         │
-                         ▼
-                ┌─────────────────┐
-                │  UPDATE TICKET  │  finalize — GLPI write-back,
-                └─────────────────┘             audit log
+```mermaid
+stateDiagram-v2
+    [*] --> classify
+    classify --> retrieve_kb
+    retrieve_kb --> decide
+    decide --> execute : auto_resolve (guard passed)
+    decide --> respond : respond_with_guide
+    decide --> route : escalate / guard override
+    execute --> finalize
+    respond --> finalize
+    route --> finalize
+    finalize --> [*]
+
+    note right of decide
+        Deterministic guard (§6.7 — code, not LLM):
+        auto_resolve with confidence below 0.85
+        or priority P1/P2 is forced to route
+    end note
+
+    note right of execute
+        Sensitive actions (§6.6): interrupt ⇒
+        GLPI approval ticket ⇒ graph paused
+        until human answer ⇒ resume (§6.9)
+    end note
 ```
+
+**Nodes:**
+
+| Node | Purpose |
+|------|---------|
+| `classify` | Node 1 — category, priority, confidence, entities |
+| `retrieve_kb` | Node 2 — RAG search over ChromaDB (score threshold 0.7) |
+| `decide` | Node 3 — `auto_resolve` / `respond_with_guide` / `escalate` (premium tier for complex tickets, §5.3) |
+| `execute` | Node 4 — tool execution behind the HITL approval gate (§6.6) |
+| `respond` | Node 5 — sends the KB-grounded guide to the user (GLPI followup) |
+| `route` | Node 5 — assigns the ticket to a human team (also on guard override) |
+| `finalize` | GLPI write-back (status/solution) + audit log (§9.7) |
 
 ### 6.4 State Definition
 
@@ -1374,6 +1374,17 @@ Enabling a cloud LLM provider means ticket text, extracted entities, and KB cont
 | **Premium quality** | Any host | OpenAI GPT-4o / Anthropic | Highest accuracy for complex tickets |
 | **Hybrid** | GPU host | Ollama primary + Groq fallback | Resilience + cost optimization |
 
+**Profile selection:**
+
+```mermaid
+graph LR
+    A[Operator chooses profile] --> B{Hardware + data sensitivity?}
+    B -->|No GPU, fast iteration| C["Demo / Dev<br/>Groq API (free tier)"]
+    B -->|GPU, sensitive data / air-gapped| D["Privacy-first<br/>Ollama local"]
+    B -->|Any host, max accuracy| E["Premium quality<br/>GPT-4o / Anthropic"]
+    B -->|GPU, resilience + cost| F["Hybrid<br/>Ollama + Groq fallback"]
+```
+
 **Expected performance by profile (full graph run: classify + retrieve + decide):**
 
 | Profile | Latency |
@@ -1568,3 +1579,4 @@ F1 ──▶ F2 ──▶ F3 ──▶ F4
 | 2.0 | 2026-09-08 | Full rewrite: framework unified on LangChain/LangGraph/LangSmith (CrewAI removed); HITL approval matrix via LangGraph `interrupt` + GLPI approval tickets; single confidence threshold (0.85) enforced in code; structured tool actions replacing string parsing; checkpointer/persistence added; §5 completed and reformatted; new sections 7–12 (Data Flow, Integration Points, Security, Deployment, Monitoring, Roadmap) |
 | 2.1 | 2026-09-08 | Provider-agnostic LLM layer: local Ollama **or** cloud APIs (Groq, OpenAI, Anthropic, Azure OpenAI, Mistral) behind `BaseChatModel`/`BaseEmbeddings` with env-based selection; fallback chains, premium-tier routing for complex tickets, A/B testing; Principle 2 reframed (local-first by default, cloud opt-in); new §5.3 (LLM Provider Layer), §9.9 (cloud governance & data egress), §11.6 (cost tracking); GPU now optional with deployment profiles; security, monitoring, and roadmap updated for provider/cost/failover |
 | 2.2 | 2026-09-08 | Audit hardening: Redis reliable-queue pattern (`BRPOPLPUSH` + `helpdesk:processing`) replacing lossy `BRPOP`; execute-node failure paths (validation refusal, approval rejection, tool error) now always assign a human owner (`_escalate_to_human`); true at-most-once via durable idempotency key `(ticket_id, action)` claimed before side effects (fail-closed); corrected `AsyncPostgresSaver` usage (async context manager + `setup()`); worker fail-safe error handling; GLPI no longer publishes host ports; temporary-password delivery designed (internal SMTP relay, §8 row 12 + §9.4) |
+| 2.3 | 2026-09-08 | Data-flow diagrams §7.3/§7.4 reworked to numbered step-per-line format; §6.3 ASCII state machine replaced with Mermaid `stateDiagram-v2` (guard + HITL interrupt notes) plus node legend table; §10.1 adds a Mermaid decision tree for deployment-profile selection |
